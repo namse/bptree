@@ -6,70 +6,69 @@ struct BPTreeSet {
 
 impl BPTreeSet {
     fn new() -> std::io::Result<Self> {
-        Ok(BPTreeSet {
+        let mut set = BPTreeSet {
             file: std::fs::OpenOptions::new()
                 .create(true)
+                .truncate(false)
                 .read(true)
                 .write(true)
                 .open("./bptree")?,
-        })
+        };
+        let root_node = LeafNode::new(vec![]);
+        set.write_block(4096, &root_node.to_bytes())?;
+        set.write_header(Header {
+            root_node_offset: 4096,
+            next_node_offset: 8192,
+        })?;
+        Ok(set)
     }
     fn add(&mut self, value: u128) -> std::io::Result<()> {
         let root_node_offset = self.root_node_offset()?;
-
-        let AddAndSplitResult::Splited {
-            right_node_offset,
-            key,
-        } = self.add_and_split_if_full(root_node_offset, value)?
+        let Some((new_child_key, new_child_node_offset)) =
+            self.add_recursive(value, root_node_offset)?
         else {
             return Ok(());
         };
 
-        let new_root_node = InternalNode::new(root_node_offset, right_node_offset, key);
+        let new_root_node =
+            InternalNode::new(root_node_offset, new_child_node_offset, new_child_key);
         let new_root_offset = self.push_new_node(&Node::Internal(new_root_node))?;
+
         self.update_root_node_offset(new_root_offset)?;
         Ok(())
     }
-    fn add_and_split_if_full(
+
+    fn add_recursive(
         &mut self,
-        node_offset: u64,
         value: u128,
-    ) -> std::io::Result<AddAndSplitResult> {
-        let node = self.node_from_offset(node_offset)?;
-        match node {
-            Node::Leaf(mut leaf_node) => {
-                let Some((mut right_node, key)) = leaf_node.add_and_split_if_full(value) else {
-                    return Ok(AddAndSplitResult::NotSplited);
-                };
-
-                right_node.prev_node_offset = Some(node_offset);
-                let right_node_offset = self.push_new_node(&Node::Leaf(right_node))?;
-
-                leaf_node.next_node_offset = Some(right_node_offset);
-                self.write_block(node_offset, &leaf_node.to_bytes())?;
-
-                Ok(AddAndSplitResult::Splited {
-                    right_node_offset,
-                    key,
-                })
-            }
-            Node::Internal(mut internal_node) => {
+        node_offset: u64,
+    ) -> std::io::Result<Option<(u128, u64)>> {
+        let mut node = self.node_from_offset(node_offset)?;
+        let splitted = match &mut node {
+            Node::Internal(internal_node) => {
                 let child_offset = internal_node.child_offset_of_value(value);
-
-                let AddAndSplitResult::Splited {
-                    right_node_offset,
-                    key,
-                } = self.add_and_split_if_full(child_offset, value)?
+                let Some((new_child_key, new_child_node_offset)) =
+                    self.add_recursive(value, child_offset)?
                 else {
-                    return Ok(AddAndSplitResult::NotSplited);
+                    return Ok(None);
                 };
 
-                let split_result = internal_node.add_and_split_if_full(right_node_offset, key);
-                여기 해야하는데, 이거 분명 setAddAndSplitIfFull 타입으로 리턴이 안될거야. 그래서 leaf때처럼 노드 푸시 해야해.
-                self.write_block(node_offset, &internal_node.to_bytes())?;
-
-                Ok(split_result)
+                internal_node
+                    .add_and_split_if_full(new_child_node_offset, new_child_key)
+                    .map(|(right_node, key)| (Node::Internal(right_node), key))
             }
+            Node::Leaf(leaf_node) => leaf_node
+                .add_and_split_if_full(value)
+                .map(|(right_node, key)| (Node::Leaf(right_node), key)),
+        };
+
+        self.write_block(node_offset, &node.to_bytes())?;
+
+        if let Some((right_node, key)) = splitted {
+            let right_node_offset = self.push_new_node(&right_node)?;
+            Ok(Some((key, right_node_offset)))
+        } else {
+            Ok(None)
         }
     }
     fn has(&self, value: u128) -> std::io::Result<bool> {
@@ -116,10 +115,9 @@ impl BPTreeSet {
             return Err(std::io::Error::last_os_error());
         }
         if (bytes_read as usize) < buf.len() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("Failed to read block {offset}, expected 4096 bytes, got {bytes_read}"),
-            ));
+            return Err(std::io::Error::other(format!(
+                "Failed to read block {offset}, expected 4096 bytes, got {bytes_read}"
+            )));
         }
 
         Ok(buf)
@@ -166,11 +164,6 @@ impl BPTreeSet {
     }
 }
 
-enum AddAndSplitResult {
-    Splited { right_node_offset: u64, key: u128 },
-    NotSplited,
-}
-
 struct Header {
     root_node_offset: u64,
     next_node_offset: u64,
@@ -210,11 +203,11 @@ impl Node {
 struct LeafNode {
     prev_node_offset: Option<u64>,
     next_node_offset: Option<u64>,
-    len: usize,
-    values: [u128; 254],
+    values: Vec<u128>,
 }
 
 impl LeafNode {
+    const MAX_VALUES: usize = 254;
     fn from_bytes(bytes: &[u8; 4096]) -> Self {
         let prev_node_offset = {
             let value = u64::from_le_bytes(bytes[1..9].try_into().unwrap());
@@ -225,143 +218,152 @@ impl LeafNode {
             if value == 0 { None } else { Some(value) }
         };
         let len = bytes[17] as usize;
-        let mut values = [0; 254];
+        let mut values = Vec::with_capacity(len);
         for i in 0..len {
             let index = 18 + i * 16;
-            values[i] = u128::from_le_bytes(bytes[index..index + 16].try_into().unwrap());
+            values.push(u128::from_le_bytes(
+                bytes[index..index + 16].try_into().unwrap(),
+            ));
         }
         Self {
             prev_node_offset,
             next_node_offset,
-            len,
             values,
         }
     }
     fn to_bytes(&self) -> [u8; 4096] {
         let mut bytes = [0; 4096];
-        bytes[1..9].copy_from_slice(&self.prev_node_offset.unwrap().to_le_bytes());
-        bytes[9..17].copy_from_slice(&self.next_node_offset.unwrap().to_le_bytes());
-        bytes[17] = self.len as u8;
-        for i in 0..self.len {
+        bytes[1..9].copy_from_slice(&self.prev_node_offset.unwrap_or_default().to_le_bytes());
+        bytes[9..17].copy_from_slice(&self.next_node_offset.unwrap_or_default().to_le_bytes());
+        bytes[17] = self.values.len() as u8;
+        for i in 0..self.values.len() {
             let index = 18 + i * 16;
             bytes[index..index + 16].copy_from_slice(&self.values[i].to_le_bytes());
         }
         bytes
     }
     fn has(&self, value: u128) -> bool {
-        for i in 0..self.len {
-            if self.values[i] == value {
-                return true;
-            }
-        }
-        false
+        self.values.contains(&value)
     }
     fn add_and_split_if_full(&mut self, value: u128) -> Option<(LeafNode, u128)> {
-        let is_not_full = self.len != self.values.len();
-        if is_not_full {
-            self.values[self.len] = value;
-            self.len += 1;
+        self.values.push(value);
+
+        if self.values.len() < LeafNode::MAX_VALUES {
             return None;
         }
 
-        let buf = {
-            let mut buf = [0; 255];
-            buf[0..self.values.len()].copy_from_slice(&self.values);
-            buf[self.values.len()] = value;
-            buf.sort();
-            buf
-        };
+        self.values.sort();
 
-        let mid = buf.len() / 2;
-        let (left, right) = buf.split_at(mid);
-        let right_node = LeafNode::new(right);
-
-        self.values[0..mid].copy_from_slice(&left);
-        self.len = mid;
-
+        let mid = self.values.len() / 2;
+        let right = self.values.split_off(mid);
         let right_values_first = right[0];
+        let right_node = LeafNode::new(right);
 
         Some((right_node, right_values_first))
     }
-    fn new(init_values: &[u128]) -> Self {
+    fn new(values: Vec<u128>) -> Self {
         Self {
             prev_node_offset: None,
             next_node_offset: None,
-            len: init_values.len(),
-            values: init_values.try_into().unwrap(),
+            values,
         }
     }
 }
 
 struct InternalNode {
-    key_len: usize,
-    keys: [u128; 170],
-    node_offsets: [u64; 171],
+    keys: Vec<u128>,
+    node_offsets: Vec<u64>,
 }
-
 impl InternalNode {
+    const MAX_KEYS: usize = 170;
+
     fn from_bytes(bytes: &[u8; 4096]) -> Self {
         let key_len = bytes[1] as usize;
-        let mut keys = [0; 170];
+        let mut keys = Vec::with_capacity(key_len);
         for i in 0..key_len {
             let index = 2 + i * 16;
-            keys[i] = u128::from_le_bytes(bytes[index..index + 16].try_into().unwrap());
+            keys.push(u128::from_le_bytes(
+                bytes[index..index + 16].try_into().unwrap(),
+            ));
         }
-        let mut node_offsets = [0; 171];
+        let mut node_offsets = Vec::with_capacity(key_len + 1);
         if key_len > 0 {
             for i in 0..key_len + 1 {
                 let index = 2 + 16 * 170 + i * 8;
-                node_offsets[i] = u64::from_le_bytes(bytes[index..index + 8].try_into().unwrap());
+                node_offsets.push(u64::from_le_bytes(
+                    bytes[index..index + 8].try_into().unwrap(),
+                ));
             }
         }
 
-        Self {
-            key_len,
-            keys,
-            node_offsets,
-        }
+        Self { keys, node_offsets }
     }
     fn to_bytes(&self) -> [u8; 4096] {
         let mut bytes = [0; 4096];
-        bytes[1] = self.key_len as u8;
-        for i in 0..self.key_len {
+        bytes[1] = self.keys.len() as u8;
+        for i in 0..self.keys.len() {
             let index = 2 + i * 16;
             bytes[index..index + 16].copy_from_slice(&self.keys[i].to_le_bytes());
         }
-        for i in 0..self.key_len + 1 {
-            let index = 2 + 16 * 170 + i * 8;
+        for i in 0..self.node_offsets.len() {
+            let index = 2 + 16 * InternalNode::MAX_KEYS + i * 8;
             bytes[index..index + 8].copy_from_slice(&self.node_offsets[i].to_le_bytes());
         }
         bytes
     }
     fn child_offset_of_value(&self, value: u128) -> u64 {
-        for i in 0..self.key_len {
+        for i in 0..self.keys.len() {
             if self.keys[i] < value {
                 return self.node_offsets[i];
             }
         }
-        self.node_offsets[self.key_len]
+        self.node_offsets[self.keys.len()]
     }
 
-    fn new(root_node_offset: u64, new_root_offset: u64, key: u128) -> Self {
-        let mut keys = [0; 170];
-        keys[0] = key;
-
-        let mut node_offsets = [0; 171];
-        node_offsets[0] = root_node_offset;
-        node_offsets[1] = new_root_offset;
-
+    fn new(left_node_offset: u64, right_node_offset: u64, key: u128) -> Self {
         Self {
-            key_len: 1,
-            keys,
-            node_offsets,
+            keys: vec![key],
+            node_offsets: vec![left_node_offset, right_node_offset],
         }
+    }
+
+    fn add_and_split_if_full(
+        &mut self,
+        node_offset: u64,
+        key: u128,
+    ) -> Option<(InternalNode, u128)> {
+        let key_index = self
+            .keys
+            .iter()
+            .position(|&k| k > key)
+            .unwrap_or(self.keys.len());
+
+        self.keys.insert(key_index, key);
+        self.node_offsets.insert(key_index + 1, node_offset);
+
+        if self.keys.len() < InternalNode::MAX_KEYS {
+            return None;
+        }
+
+        let mid_and_right_keys = self.keys.split_off(self.keys.len() / 2);
+        let (mid_key, right_keys) = mid_and_right_keys.split_first().unwrap();
+
+        let right_node_offsets = self.node_offsets.split_off(self.node_offsets.len() / 2);
+
+        assert_eq!(right_keys.len(), right_node_offsets.len() - 1);
+
+        let right_node = InternalNode {
+            keys: right_keys.to_vec(),
+            node_offsets: right_node_offsets,
+        };
+
+        Some((right_node, *mid_key))
     }
 }
 
 fn main() {
     let mut set = BPTreeSet::new().unwrap();
-    set.add(10203040);
+    set.add(10203040).unwrap();
     println!(
         "has 10203040? expected true, actual {}",
         set.has(10203040).unwrap()
