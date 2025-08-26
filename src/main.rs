@@ -25,7 +25,7 @@ impl BPTreeSet {
     fn add(&mut self, value: u128) -> std::io::Result<()> {
         let root_node_offset = self.root_node_offset()?;
         let Some((new_child_key, new_child_node_offset)) =
-            self.add_recursive(value, root_node_offset)?
+            self.add_recursive(root_node_offset, value)?
         else {
             return Ok(());
         };
@@ -40,15 +40,15 @@ impl BPTreeSet {
 
     fn add_recursive(
         &mut self,
-        value: u128,
         node_offset: u64,
+        value: u128,
     ) -> std::io::Result<Option<(u128, u64)>> {
         let mut node = self.node_from_offset(node_offset)?;
         let splitted = match &mut node {
             Node::Internal(internal_node) => {
                 let child_offset = internal_node.child_offset_of_value(value);
                 let Some((new_child_key, new_child_node_offset)) =
-                    self.add_recursive(value, child_offset)?
+                    self.add_recursive(child_offset, value)?
                 else {
                     return Ok(None);
                 };
@@ -221,9 +221,8 @@ impl LeafNode {
         let mut values = Vec::with_capacity(len);
         for i in 0..len {
             let index = 18 + i * 16;
-            values.push(u128::from_le_bytes(
-                bytes[index..index + 16].try_into().unwrap(),
-            ));
+            let value = u128::from_le_bytes(bytes[index..index + 16].try_into().unwrap());
+            values.push(value);
         }
         Self {
             prev_node_offset,
@@ -282,14 +281,13 @@ impl InternalNode {
         let mut keys = Vec::with_capacity(key_len);
         for i in 0..key_len {
             let index = 2 + i * 16;
-            keys.push(u128::from_le_bytes(
-                bytes[index..index + 16].try_into().unwrap(),
-            ));
+            let key = u128::from_le_bytes(bytes[index..index + 16].try_into().unwrap());
+            keys.push(key);
         }
         let mut node_offsets = Vec::with_capacity(key_len + 1);
         if key_len > 0 {
             for i in 0..key_len + 1 {
-                let index = 2 + 16 * 170 + i * 8;
+                let index = 2 + 16 * InternalNode::MAX_KEYS + i * 8;
                 node_offsets.push(u64::from_le_bytes(
                     bytes[index..index + 8].try_into().unwrap(),
                 ));
