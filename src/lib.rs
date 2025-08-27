@@ -1,11 +1,11 @@
 use std::os::fd::AsRawFd;
 
-struct BPTreeSet {
+pub struct BPTreeSet {
     file: std::fs::File,
 }
 
 impl BPTreeSet {
-    fn new() -> std::io::Result<Self> {
+    pub fn new() -> std::io::Result<Self> {
         let mut set = BPTreeSet {
             file: std::fs::OpenOptions::new()
                 .create(true)
@@ -22,7 +22,7 @@ impl BPTreeSet {
         })?;
         Ok(set)
     }
-    fn add(&mut self, value: u128) -> std::io::Result<()> {
+    pub fn add(&mut self, value: u128) -> std::io::Result<()> {
         let root_node_offset = self.root_node_offset()?;
         let Some((new_child_key, new_child_node_offset)) =
             self.add_recursive(root_node_offset, value)?
@@ -71,7 +71,7 @@ impl BPTreeSet {
             Ok(None)
         }
     }
-    fn has(&self, value: u128) -> std::io::Result<bool> {
+    pub fn has(&self, value: u128) -> std::io::Result<bool> {
         let mut node = self.root_node()?;
         loop {
             match node {
@@ -357,17 +357,4 @@ impl InternalNode {
 
         Some((right_node, *mid_key))
     }
-}
-
-fn main() {
-    let mut set = BPTreeSet::new().unwrap();
-    set.add(10203040).unwrap();
-    println!(
-        "has 10203040? expected true, actual {}",
-        set.has(10203040).unwrap()
-    );
-    println!(
-        "has 12345678? expected false, actual {}",
-        set.has(12345678).unwrap()
-    );
 }
