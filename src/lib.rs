@@ -27,6 +27,7 @@ impl BPTreeSet {
         let Some((new_child_key, new_child_node_offset)) =
             self.add_recursive(root_node_offset, value)?
         else {
+            self.file_sync()?;
             return Ok(());
         };
 
@@ -35,6 +36,7 @@ impl BPTreeSet {
         let new_root_offset = self.push_new_node(&Node::Internal(new_root_node))?;
 
         self.update_root_node_offset(new_root_offset)?;
+        self.file_sync()?;
         Ok(())
     }
 
@@ -161,6 +163,9 @@ impl BPTreeSet {
         let offset = self.allocate_node_offset()?;
         self.write_block(offset, &node.to_bytes())?;
         Ok(offset)
+    }
+    fn file_sync(&mut self) -> std::io::Result<()> {
+        self.file.sync_all()
     }
 }
 

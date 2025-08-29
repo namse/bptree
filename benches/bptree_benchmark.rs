@@ -16,6 +16,7 @@ fn setup_bptree(num_elements: u32) -> BPTreeSet {
 
 fn bench_random_add(c: &mut Criterion) {
     let mut group = c.benchmark_group("BTreeSet Add");
+    group.sample_size(10);
 
     // 100개, 1000개, 10000개, 100,000개 삽입 성능 측정
     for &size in [100, 1_000, 10_000, 100_000].iter() {
@@ -44,6 +45,7 @@ fn bench_random_add(c: &mut Criterion) {
 
 fn bench_random_has(c: &mut Criterion) {
     let mut group = c.benchmark_group("BTreeSet Has");
+    group.sample_size(10);
 
     for size in [1_000, 10_000, 100_000].iter() {
         let btree = setup_bptree(*size as u32);
